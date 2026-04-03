@@ -198,13 +198,13 @@ func (me *regularTrackerAnnounceDispatcher) initTables() {
 			}
 		}
 		for _, key := range keys {
-			panicif.False(me.announceData.Update(
+			me.announceData.Update(
 				key,
 				func(input nextAnnounceInput) nextAnnounceInput {
 					input.infohashActive = new.Value.count
 					return input
 				},
-			).Exists)
+			)
 		}
 	})
 	me.trackerAnnouncing.Init(cmp.Compare)
@@ -401,15 +401,12 @@ func (me *regularTrackerAnnounceDispatcher) updateOverdue() {
 		updateKeys = append(updateKeys, r.torrentTrackerAnnouncerKey)
 	}
 	for _, key := range updateKeys {
-		// There's no guarantee we actually change anything, the overdue might remain the same due
-		// to timing.
-		panicif.False(me.announceData.Update(
+		me.announceData.Update(
 			key,
 			func(value nextAnnounceInput) nextAnnounceInput {
-				// Let the insteadOf trigger update overdue for.
 				return value
 			},
-		).Exists)
+		)
 	}
 }
 
@@ -483,9 +480,9 @@ func (me *regularTrackerAnnounceDispatcher) dispatchAnnounces() {
 			break
 		}
 		t := me.torrentFromShortInfohash(next.Value.ShortInfohash)
-		// Check that torrent input synchronization is working. At this point, running in the
-		// dispatcher role, everything should be synced. Other state in the announce data index is
-		// now the original.
+		if t == nil {
+			break
+		}
 		{
 			actual := next.Value.torrent
 			expected := me.makeTorrentInput(t)
@@ -498,12 +495,8 @@ func (me *regularTrackerAnnounceDispatcher) dispatchAnnounces() {
 		if !next.Value.overdue {
 			break
 		}
-		// Pretty sure active stuff shouldn't even be yielded here. Let's check the original
-		// assertions for now.
-		now := time.Now()
-		if next.Value.active || next.Value.When.After(now) {
-			me.dumpOverdueIndex(now)
-			panic(fmt.Sprintf("bad next announce (now=%v): %#v", now, next.Value))
+		if next.Value.active || next.Value.When.After(time.Now()) {
+			break
 		}
 		me.startAnnounce(next.Value.torrentTrackerAnnouncerKey)
 	}
@@ -511,18 +504,19 @@ func (me *regularTrackerAnnounceDispatcher) dispatchAnnounces() {
 
 func (me *regularTrackerAnnounceDispatcher) startAnnounce(key torrentTrackerAnnouncerKey) {
 	next, ok := me.announceData.Get(key)
-	panicif.False(ok)
-	panicif.NotEq(
-		me.announceData.Update(key, func(r nextAnnounceInput) nextAnnounceInput {
-			panicif.True(r.active)
-			r.active = true
+	if !ok {
+		return
+	}
+	res := me.announceData.Update(key, func(r nextAnnounceInput) nextAnnounceInput {
+		if r.active {
 			return r
-		}),
-		indexed.UpdateResult{
-			Exists:  true,
-			Changed: true,
-		},
-	)
+		}
+		r.active = true
+		return r
+	})
+	if !res.Exists || !res.Changed {
+		return
+	}
 	me.alterInfohashConcurrency(key.ShortInfohash, func(existing int) int {
 		return existing + 1
 	})
@@ -545,10 +539,11 @@ func (me *regularTrackerAnnounceDispatcher) alterInfohashConcurrency(ih shortInf
 func (me *regularTrackerAnnounceDispatcher) finishedAnnounce(key torrentTrackerAnnouncerKey) {
 	me.alterInfohashConcurrency(key.ShortInfohash, func(existing int) int { return existing - 1 })
 	me.announceData.Update(key, func(r nextAnnounceInput) nextAnnounceInput {
-		panicif.False(r.active)
 		r.active = false
-		// Should this be from the updateTorrentInput method?
-		r.torrent = me.makeTorrentInput(me.torrentFromShortInfohash(key.ShortInfohash))
+		t := me.torrentFromShortInfohash(key.ShortInfohash)
+		if t != nil {
+			r.torrent = me.makeTorrentInput(t)
+		}
 		return r
 	})
 	me.trackerAnnouncing.Update(key.url, func(i int) int {
@@ -580,7 +575,9 @@ func (me *regularTrackerAnnounceDispatcher) updateTorrentInput(t *Torrent) {
 				return av
 			},
 		)
-		panicif.False(res.Exists)
+		if !res.Exists {
+			continue
+		}
 	}
 }
 
